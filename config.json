@@ -1,0 +1,75 @@
+{
+  "device_id": "living_room_pi",
+  "device_name": "Living Room Speaker",
+  "location": "Living Room",
+  
+  "transmitter": {
+    "host": "192.168.1.100",
+    "port": 8080,
+    "mqtt_host": "192.168.1.100",
+    "mqtt_port": 1883
+  },
+  
+  "audio_output": {
+    "type": "chromecast",
+    "target": "Living Room Chromecast",
+    "ip_address": "192.168.1.150",
+    "base_latency_ms": 300,
+    "sample_rate": 44100,
+    "channels": 2
+  },
+  
+  "microphone": {
+    "type": "i2s",
+    "device_name": "hw:1,0",
+    "sample_rate": 44100,
+    "channels": 1,
+    "chunk_duration": 0.1
+  },
+  
+  "drift_detection": {
+    "correlation_window": 2.0,
+    "min_correlation": 0.7,
+    "max_drift_ms": 1000.0,
+    "measurement_interval": 5.0
+  },
+  
+  "sync_group": "main_floor",
+  
+  "system": {
+    "log_level": "INFO",
+    "log_file": "/var/log/syncstream/receiver.log",
+    "pid_file": "/var/run/syncstream/receiver.pid",
+    "auto_start": true,
+    "heartbeat_interval": 30
+  },
+  
+  "gpio": {
+    "status_led_pin": 18,
+    "button_pin": 24,
+    "enable_status_indicators": true
+  },
+  
+  "network": {
+    "wifi_ssid": "SyncStream_Network",
+    "wifi_password": "syncstream123",
+    "static_ip": null,
+    "dns_servers": ["8.8.8.8", "8.8.4.4"]
+  },
+  
+  "calibration": {
+    "auto_calibrate_on_start": true,
+    "calibration_duration": 30,
+    "calibration_tone_frequency": 1000,
+    "save_calibration_data": true
+  },
+  
+  "advanced": {
+    "cpu_governor": "performance",
+    "audio_priority": "high",
+    "network_buffer_size": 65536,
+    "enable_debug_output": false,
+    "max_memory_usage_mb": 256
+  }
+}
+

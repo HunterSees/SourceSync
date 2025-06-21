@@ -1,0 +1,153 @@
+# SyncStream Transmitter Configuration
+# This file defines device profiles, sync settings, and system configuration
+
+# System Configuration
+system:
+  # Audio settings
+  audio:
+    sample_rate: 44100
+    channels: 2
+    buffer_duration: 10.0  # seconds
+    chunk_duration: 0.1    # seconds
+  
+  # MQTT broker settings
+  mqtt:
+    host: "localhost"
+    port: 1883
+    keepalive: 60
+    client_id: "syncstream_transmitter"
+  
+  # Synchronization settings
+  sync:
+    tolerance_ms: 15.0      # Maximum allowed drift before correction
+    adjustment_rate: 0.2    # Rate of offset adjustment (0.0 to 1.0)
+    heartbeat_interval: 5   # seconds
+    device_timeout: 30      # seconds before device considered offline
+  
+  # Web API settings
+  api:
+    host: "0.0.0.0"
+    port: 8080
+    cors_origins: ["*"]
+
+# Device Profiles
+# These define the expected characteristics of different device types
+device_profiles:
+  analog:
+    base_latency_ms: 50
+    description: "Analog audio output (3.5mm jack, USB DAC)"
+    max_drift_variance: 20.0
+    
+  hdmi:
+    base_latency_ms: 100
+    description: "HDMI audio output to TV/monitor"
+    max_drift_variance: 30.0
+    
+  chromecast:
+    base_latency_ms: 300
+    description: "Google Chromecast/Cast-enabled device"
+    max_drift_variance: 50.0
+    
+  airplay:
+    base_latency_ms: 250
+    description: "Apple AirPlay device"
+    max_drift_variance: 40.0
+    
+  bluetooth:
+    base_latency_ms: 200
+    description: "Bluetooth audio device"
+    max_drift_variance: 60.0
+    
+  snapcast:
+    base_latency_ms: 80
+    description: "Snapcast client"
+    max_drift_variance: 25.0
+
+# Sync Groups
+# Devices in the same group will be synchronized together
+sync_groups:
+  main_floor:
+    description: "Main floor speakers"
+    priority: 1
+    devices: []  # Will be populated as devices register
+    
+  upstairs:
+    description: "Upstairs speakers"
+    priority: 2
+    devices: []
+    
+  outdoor:
+    description: "Outdoor speakers"
+    priority: 3
+    devices: []
+    
+  whole_house:
+    description: "All speakers"
+    priority: 0
+    devices: []
+
+# Registered Devices
+# This section is automatically updated as devices register
+registered_devices: {}
+
+# Audio Sources
+# Configuration for different audio input sources
+audio_sources:
+  microphone:
+    type: "microphone"
+    device_index: null  # null = default device
+    enabled: false
+    
+  file:
+    type: "file"
+    filename: "/home/ubuntu/test_audio.wav"
+    loop: true
+    enabled: false
+    
+  stream:
+    type: "ffmpeg"
+    input_url: "http://stream.example.com/audio"
+    enabled: false
+    
+  snapserver:
+    type: "snapserver"
+    fifo_path: "/tmp/snapfifo"
+    enabled: true
+
+# Advanced Settings
+advanced:
+  # Drift detection settings
+  drift_detection:
+    correlation_window: 2.0    # seconds
+    min_correlation: 0.7       # minimum correlation for valid drift measurement
+    outlier_threshold: 3.0     # standard deviations for outlier detection
+    
+  # Buffer management
+  buffer:
+    auto_adjust_size: true
+    min_buffer_duration: 5.0   # seconds
+    max_buffer_duration: 30.0  # seconds
+    
+  # Logging
+  logging:
+    level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+    file: "/var/log/syncstream/transmitter.log"
+    max_size_mb: 10
+    backup_count: 5
+    
+  # Performance
+  performance:
+    thread_priority: "normal"  # low, normal, high
+    cpu_affinity: null         # CPU cores to use (null = auto)
+    
+  # Network
+  network:
+    tcp_nodelay: true
+    socket_buffer_size: 65536
+    
+  # Calibration
+  calibration:
+    auto_calibrate: true
+    calibration_duration: 30   # seconds
+    min_devices_for_calibration: 2
+
