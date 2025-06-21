@@ -19,12 +19,38 @@ logger = logging.getLogger(__name__)
 class DeviceState:
     """Represents the synchronization state of a single receiver device."""
     
-    def __init__(self, device_id: str, base_latency_ms: float = 0.0):
+    # Default configuration parameters for DeviceState instances
+    DEFAULT_DRIFT_HISTORY_MAXLEN = 50
+    DEFAULT_RECENT_DRIFTS_WINDOW = 10
+    DEFAULT_ONLINE_TIMEOUT_SECONDS = 30.0
+    DEFAULT_STABILITY_MAX_VARIANCE = 25.0
+    DEFAULT_STABILITY_MIN_MEASUREMENTS = 5
+    DEFAULT_STABILITY_MIN_CONNECTION_QUALITY = 0.5
+    # Magic numbers for connection quality calculation
+    SIGNAL_QUALITY_OFFSET = 80
+    SIGNAL_QUALITY_SCALE = 30
+    DRIFT_VARIANCE_SCALE = 100.0
+
+    def __init__(self, device_id: str, base_latency_ms: float = 0.0,
+                 drift_history_maxlen: int = DEFAULT_DRIFT_HISTORY_MAXLEN,
+                 recent_drifts_window: int = DEFAULT_RECENT_DRIFTS_WINDOW,
+                 online_timeout_seconds: float = DEFAULT_ONLINE_TIMEOUT_SECONDS,
+                 stability_max_variance: float = DEFAULT_STABILITY_MAX_VARIANCE,
+                 stability_min_measurements: int = DEFAULT_STABILITY_MIN_MEASUREMENTS,
+                 stability_min_connection_quality: float = DEFAULT_STABILITY_MIN_CONNECTION_QUALITY):
         self.device_id = device_id
         self.base_latency_ms = base_latency_ms
         
+        # Configurable parameters
+        self.drift_history_maxlen = drift_history_maxlen
+        self.recent_drifts_window = recent_drifts_window
+        self.online_timeout_seconds = online_timeout_seconds
+        self.stability_max_variance = stability_max_variance
+        self.stability_min_measurements = stability_min_measurements
+        self.stability_min_connection_quality = stability_min_connection_quality
+
         # Drift tracking
-        self.drift_history = deque(maxlen=50)  # Keep last 50 drift measurements
+        self.drift_history = deque(maxlen=self.drift_history_maxlen)
         self.last_drift_ms = 0.0
         self.last_drift_time = 0.0
         
@@ -41,7 +67,8 @@ class DeviceState:
         self.is_online = False
         self.last_seen = 0.0
         
-        logger.info(f"DeviceState created for {device_id} with base latency {base_latency_ms}ms")
+        logger.info(f"DeviceState created for {device_id} with base latency {base_latency_ms}ms "
+                    f"and config: {drift_history_maxlen=}, {recent_drifts_window=}, {online_timeout_seconds=}, ...") # Simplified log
     
     def update_drift(self, drift_ms: float, signal_strength: float = -50.0) -> None:
         """Update drift measurement for this device."""
@@ -59,14 +86,15 @@ class DeviceState:
         self.last_seen = current_time
         
         # Update statistics
-        if len(self.drift_history) >= 3:
-            recent_drifts = [d['drift_ms'] for d in list(self.drift_history)[-10:]]
-            self.avg_drift_ms = statistics.mean(recent_drifts)
-            self.drift_variance = statistics.variance(recent_drifts) if len(recent_drifts) > 1 else 0.0
+        if len(self.drift_history) >= 3: # Min samples for variance/mean
+            # Use the configured window for recent drifts
+            recent_drifts_slice = list(self.drift_history)[-self.recent_drifts_window:]
+            self.avg_drift_ms = statistics.mean(recent_drifts_slice)
+            self.drift_variance = statistics.variance(recent_drifts_slice) if len(recent_drifts_slice) > 1 else 0.0
             
             # Update connection quality based on signal strength and drift stability
-            signal_quality = max(0.0, min(1.0, (signal_strength + 80) / 30))  # -80 to -50 dBm range
-            drift_stability = max(0.0, min(1.0, 1.0 - (self.drift_variance / 100.0)))
+            signal_quality = max(0.0, min(1.0, (signal_strength + self.SIGNAL_QUALITY_OFFSET) / self.SIGNAL_QUALITY_SCALE))
+            drift_stability = max(0.0, min(1.0, 1.0 - (self.drift_variance / self.DRIFT_VARIANCE_SCALE)))
             self.connection_quality = (signal_quality + drift_stability) / 2.0
         
         logger.debug(f"Device {self.device_id}: drift={drift_ms:.1f}ms, "
@@ -91,18 +119,23 @@ class DeviceState:
         
         return target
     
-    def is_stable(self, max_variance: float = 25.0) -> bool:
+    def is_stable(self, max_variance: Optional[float] = None) -> bool:
         """Check if device drift is stable enough for synchronization."""
-        return (len(self.drift_history) >= 5 and 
-                self.drift_variance <= max_variance and
-                self.connection_quality >= 0.5)
+        # Use instance's configured max_variance if not overridden by arg
+        effective_max_variance = max_variance if max_variance is not None else self.stability_max_variance
+
+        return (len(self.drift_history) >= self.stability_min_measurements and
+                self.drift_variance <= effective_max_variance and
+                self.connection_quality >= self.stability_min_connection_quality)
     
     def get_status(self) -> dict:
         """Get current status of this device."""
         current_time = time.time()
+        is_currently_online = self.is_online and (current_time - self.last_seen) < self.online_timeout_seconds
+
         return {
             'device_id': self.device_id,
-            'is_online': self.is_online and (current_time - self.last_seen) < 30.0,
+            'is_online': is_currently_online,
             'last_drift_ms': self.last_drift_ms,
             'avg_drift_ms': self.avg_drift_ms,
             'drift_variance': self.drift_variance,
@@ -120,18 +153,41 @@ class SyncController:
     Main synchronization controller that manages drift correction
     and buffer offset calculations for all receiver devices.
     """
-    
-    def __init__(self, sync_tolerance_ms: float = 10.0, 
-                 adjustment_rate: float = 0.1):
+    DEFAULT_MIN_SYNC_INTERVAL_SECONDS = 1.0
+
+    def __init__(self,
+                 sync_tolerance_ms: float = 10.0,
+                 adjustment_rate: float = 0.1,
+                 min_sync_interval_seconds: float = DEFAULT_MIN_SYNC_INTERVAL_SECONDS,
+                 # Parameters for DeviceState configuration, passed down
+                 dev_drift_history_maxlen: int = DeviceState.DEFAULT_DRIFT_HISTORY_MAXLEN,
+                 dev_recent_drifts_window: int = DeviceState.DEFAULT_RECENT_DRIFTS_WINDOW,
+                 dev_online_timeout_seconds: float = DeviceState.DEFAULT_ONLINE_TIMEOUT_SECONDS,
+                 dev_stability_max_variance: float = DeviceState.DEFAULT_STABILITY_MAX_VARIANCE,
+                 dev_stability_min_measurements: int = DeviceState.DEFAULT_STABILITY_MIN_MEASUREMENTS,
+                 dev_stability_min_connection_quality: float = DeviceState.DEFAULT_STABILITY_MIN_CONNECTION_QUALITY):
         """
         Initialize the sync controller.
         
         Args:
-            sync_tolerance_ms: Maximum allowed drift before correction
-            adjustment_rate: Rate of offset adjustment (0.0 to 1.0)
+            sync_tolerance_ms: Maximum allowed drift before correction.
+            adjustment_rate: Rate of offset adjustment (0.0 to 1.0).
+            min_sync_interval_seconds: Minimum interval between sync checks.
+            dev_*: Parameters to configure individual DeviceState instances.
         """
         self.sync_tolerance_ms = sync_tolerance_ms
         self.adjustment_rate = adjustment_rate
+        self.min_sync_interval_seconds = min_sync_interval_seconds
+
+        # Store DeviceState configuration parameters
+        self.device_state_config = {
+            'drift_history_maxlen': dev_drift_history_maxlen,
+            'recent_drifts_window': dev_recent_drifts_window,
+            'online_timeout_seconds': dev_online_timeout_seconds,
+            'stability_max_variance': dev_stability_max_variance,
+            'stability_min_measurements': dev_stability_min_measurements,
+            'stability_min_connection_quality': dev_stability_min_connection_quality,
+        }
         
         # Device management
         self.devices: Dict[str, DeviceState] = {}
@@ -158,7 +214,11 @@ class SyncController:
             device_type = config.get('type', 'unknown')
             sync_group = config.get('sync_group', 'default')
             
-            self.devices[device_id] = DeviceState(device_id, base_latency)
+            self.devices[device_id] = DeviceState(
+                device_id=device_id,
+                base_latency_ms=base_latency,
+                **self.device_state_config  # Pass down the stored config
+            )
             self.device_configs[device_id] = config.copy()
             
             # Add to sync group
@@ -188,7 +248,7 @@ class SyncController:
         current_time = time.time()
         
         # Don't sync too frequently
-        if current_time - self.last_sync_time < 1.0:
+        if current_time - self.last_sync_time < self.min_sync_interval_seconds:
             return
         
         for group_name, device_ids in self.sync_groups.items():
