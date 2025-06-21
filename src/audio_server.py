@@ -11,10 +11,11 @@ import logging
 import subprocess
 import numpy as np
 from typing import Optional, Callable, Dict, Any
-import queue
+import queue # Still used by FFmpegSource.read for timeout-based get
+from collections import deque # For FFmpegSource internal buffer
 import wave
 import pyaudio
-from audio_buffer import AudioBuffer
+from src.audio_buffer import AudioBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -215,12 +216,20 @@ class FileSource(AudioSource):
 class FFmpegSource(AudioSource):
     """Audio source from FFmpeg subprocess (for streaming, etc.)."""
     
-    def __init__(self, input_url: str, sample_rate: int = 44100, channels: int = 2):
+    DEFAULT_FFMPEG_CHUNK_SAMPLES = 1024
+    DEFAULT_AUDIO_QUEUE_MAXLEN = 100 # Max number of chunks in the deque
+
+    def __init__(self, input_url: str, sample_rate: int = 44100, channels: int = 2,
+                 ffmpeg_chunk_samples: int = DEFAULT_FFMPEG_CHUNK_SAMPLES,
+                 audio_queue_maxlen: int = DEFAULT_AUDIO_QUEUE_MAXLEN):
         super().__init__(sample_rate, channels)
         self.input_url = input_url
         self.process = None
-        self.audio_queue = queue.Queue(maxsize=100)
+        # Calculate chunk size in bytes: samples * channels * 4 bytes/float
+        self.ffmpeg_chunk_size_bytes = ffmpeg_chunk_samples * self.channels * 4
+        self.audio_queue = deque(maxlen=audio_queue_maxlen)
         self.reader_thread = None
+        self._audio_data_lock = threading.Lock() # To protect access to audio_queue
         
     def start(self) -> bool:
         """Start FFmpeg audio capture."""
@@ -272,34 +281,32 @@ class FFmpegSource(AudioSource):
     
     def _read_audio_data(self) -> None:
         """Read audio data from FFmpeg process in background thread."""
-        chunk_size = 1024 * self.channels * 4  # 1024 samples * channels * 4 bytes per float
-        
-        while self.is_running and self.process:
+        while self.is_running and self.process and self.process.stdout:
             try:
-                data = self.process.stdout.read(chunk_size)
+                data = self.process.stdout.read(self.ffmpeg_chunk_size_bytes)
                 if not data:
+                    logger.info("FFmpeg stdout stream ended.")
                     break
                 
                 # Convert to numpy array
                 audio_array = np.frombuffer(data, dtype=np.float32)
                 if self.channels == 2:
-                    audio_array = audio_array.reshape(-1, 2)
+                    # Ensure correct shape even if last chunk is partial
+                    if audio_array.size % 2 == 0:
+                        audio_array = audio_array.reshape(-1, 2)
+                    else: # Should not happen with f32le, but good to be safe
+                        logger.warning("Received odd number of samples for stereo, discarding last sample.")
+                        audio_array = audio_array[:-1].reshape(-1, 2)
                 else:
                     audio_array = audio_array.reshape(-1, 1)
                 
-                # Add to queue (non-blocking)
-                try:
-                    self.audio_queue.put(audio_array, block=False)
-                except queue.Full:
-                    # Drop oldest data if queue is full
-                    try:
-                        self.audio_queue.get(block=False)
-                        self.audio_queue.put(audio_array, block=False)
-                    except queue.Empty:
-                        pass
+                if audio_array.size > 0:
+                    with self._audio_data_lock:
+                        self.audio_queue.append(audio_array)
                         
             except Exception as e:
-                logger.error(f"Error reading FFmpeg data: {e}")
+                if self.is_running: # Don't log errors if we are stopping
+                    logger.error(f"Error reading FFmpeg data: {e}")
                 break
     
     def read(self, frames: int) -> Optional[np.ndarray]:
@@ -308,27 +315,48 @@ class FFmpegSource(AudioSource):
             return None
         
         try:
-            # Collect audio data from queue
-            audio_data = []
+            # Collect audio data from deque
+            audio_chunks_to_process = []
             frames_collected = 0
             
-            while frames_collected < frames:
-                try:
-                    chunk = self.audio_queue.get(timeout=0.1)
-                    audio_data.append(chunk)
-                    frames_collected += len(chunk)
-                except queue.Empty:
-                    break
-            
-            if not audio_data:
+            with self._audio_data_lock:
+                while self.audio_queue and frames_collected < frames:
+                    chunk = self.audio_queue.popleft()
+                    audio_chunks_to_process.append(chunk)
+                    frames_collected += len(chunk) # Assumes len gives number of frames
+
+            if not audio_chunks_to_process:
+                # To prevent busy-waiting if called in a tight loop, sleep briefly
+                # This behavior is different from queue.get(timeout=0.1)
+                # If the caller expects blocking, this needs more advanced handling (e.g. Condition)
+                time.sleep(0.01)
                 return None
             
             # Concatenate and trim to requested length
-            result = np.concatenate(audio_data, axis=0)[:frames]
-            return result
+            # This is done outside the lock to minimize lock holding time
+            result_array = np.concatenate(audio_chunks_to_process, axis=0)
+
+            # If we collected more frames than needed, put the excess back
+            # This is important to avoid data loss if frames_collected > frames
+            if frames_collected > frames:
+                excess_frames = frames_collected - frames
+                excess_data = result_array[frames:]
+                result_array = result_array[:frames]
+
+                # The excess data needs to be reshaped correctly if it's stereo
+                # and then put back into the deque AT THE FRONT
+                if self.channels == 2:
+                    excess_data = excess_data.reshape(-1, 2)
+                else:
+                    excess_data = excess_data.reshape(-1, 1)
+
+                with self._audio_data_lock:
+                    self.audio_queue.appendleft(excess_data)
+
+            return result_array
             
         except Exception as e:
-            logger.error(f"Error reading from FFmpeg source: {e}")
+            logger.error(f"Error reading from FFmpeg source deque: {e}")
             return None
 
 

@@ -11,11 +11,24 @@ from src.routes.sync import sync_bp
 from src.routes.audio import audio_bp
 from src.routes.system import system_bp
 
-app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
-app.config['SECRET_KEY'] = 'syncstream_secret_key_2024'
+import warnings
 
-# Enable CORS for all routes
-CORS(app, origins=['*'])
+app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
+
+# Secure SECRET_KEY
+SECRET_KEY = os.environ.get('FLASK_SECRET_KEY', 'dev_syncstream_secret_key_2024_do_not_use_in_prod')
+if SECRET_KEY == 'dev_syncstream_secret_key_2024_do_not_use_in_prod':
+    warnings.warn("FLASK_SECRET_KEY is not set or uses the default development key. This is insecure for production.", UserWarning)
+app.config['SECRET_KEY'] = SECRET_KEY
+
+# Configure CORS
+CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS')
+if CORS_ALLOWED_ORIGINS:
+    origins = [origin.strip() for origin in CORS_ALLOWED_ORIGINS.split(',')]
+else:
+    warnings.warn("CORS_ALLOWED_ORIGINS is not set. Defaulting to restrictive CORS policy (currently none). For development, consider setting to 'http://localhost:3000' or similar.", UserWarning)
+    origins = [] # Or a default like 'http://localhost:your_dev_port' if known
+CORS(app, origins=origins, supports_credentials=True) # Added supports_credentials as it's often needed
 
 # Register API blueprints
 app.register_blueprint(devices_bp, url_prefix='/api')
@@ -28,6 +41,9 @@ app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(os.path.dirnam
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 with app.app_context():
+    # For production environments, consider using a database migration tool
+    # like Flask-Migrate (with Alembic) to manage schema changes.
+    # db.create_all() is suitable for development and initial setup.
     db.create_all()
 
 @app.route('/', defaults={'path': ''})
